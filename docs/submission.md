@@ -2,7 +2,7 @@
 
 ## The problem
 
-Small product-development teams (I've spent 12 years in garment product development, so this one is close to home) need change control: an engineer proposes a change to a part, a human approves or rejects it, and the decision must be auditable afterwards. The tools that do this properly - PLM/ERP change-management modules - are built for enterprises: expensive, heavy, and they need someone to run them. A three-person team doesn't adopt that. It either improvises in spreadsheets or skips change control entirely.
+Small product-development teams need change control: an engineer proposes a change to a part, a human approves or rejects it, and the decision must be auditable afterwards. The tools that do this properly - PLM/ERP change-management modules - are built for enterprises: expensive, heavy, and they need someone to run them. A three-person team doesn't adopt that. It either improvises in spreadsheets or skips change control entirely.
 
 ChangeFlow is the missing middle: a real change-approval workflow with frozen snapshots, an audit trail, and clean approve/reject history - built entirely from five managed AWS services, costing $0 while idle, with nothing to patch or babysit after deploy.
 
