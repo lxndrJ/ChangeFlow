@@ -70,6 +70,10 @@ flowchart LR
 | **S3** | Frozen request snapshots, immutable audit records, hosts the static UI | The "write once, trust later" layer of the audit story |
 | **Step Functions** | The actual workflow: validate, wait for human, branch, execute/close | The callback pattern replaces a long-running approval server |
 
+### Visualisierte Step Functions State Machine
+
+![Step Functions Graph](./docs/stepfunctions_graph.png)
+
 ### The reusable pattern: `waitForTaskToken`
 
 The heart of the build is a **human-in-the-loop approval without any server waiting around**:
