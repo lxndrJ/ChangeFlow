@@ -1,3 +1,6 @@
+
+![Step Functions Graph](./docs/stepfunctions_graph.png)
+
 # ChangeFlow
 
 **Serverless engineering-change approvals for teams that can't justify a PLM.**
@@ -69,10 +72,6 @@ flowchart LR
 | **DynamoDB** | Single table `requests` with `status` GSI, on-demand billing, SSE | Millisecond reads for the UI, conditional updates prevent double approvals |
 | **S3** | Frozen request snapshots, immutable audit records, hosts the static UI | The "write once, trust later" layer of the audit story |
 | **Step Functions** | The actual workflow: validate, wait for human, branch, execute/close | The callback pattern replaces a long-running approval server |
-
-### Visualisierte Step Functions State Machine
-
-![Step Functions Graph](./docs/stepfunctions_graph.png)
 
 ### The reusable pattern: `waitForTaskToken`
 
