@@ -1,0 +1,423 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  ChangeFlow - a serverless engineering-change approval workflow.
+  API Gateway (HTTP API) + Lambda + DynamoDB + S3 + Step Functions.
+  Human-in-the-loop approval via the Step Functions waitForTaskToken callback pattern.
+
+Parameters:
+  ApprovalTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 60
+    Description: How long Step Functions waits for a human decision before the change request expires.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Handler: app.lambda_handler
+    Timeout: 10
+    MemorySize: 128
+    Architectures: [arm64]
+
+Resources:
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowHeaders: ["content-type"]
+        AllowMethods: ["GET", "POST", "OPTIONS"]
+        AllowCredentials: false
+
+  RequestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-requests"
+      AttributeDefinitions:
+        - AttributeName: requestId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: requestId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: statusIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-artifacts-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-site-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${WebsiteBucket.Arn}/*"
+
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-handlers
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ValidateFunction.Arn
+                  - !GetAtt NotifyFunction.Arn
+                  - !GetAtt ExecuteFunction.Arn
+                  - !GetAtt FinalizeFunction.Arn
+
+  ApprovalStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${AWS::StackName}-approval"
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "Comment": "ChangeFlow: validate a change request, wait for a human decision via callback, then execute or close it.",
+            "StartAt": "Validate",
+            "States": {
+              "Validate": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${ValidateFunction}",
+                  "Payload.$": "$"
+                },
+                "Retry": [
+                  {
+                    "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+                    "IntervalSeconds": 2,
+                    "MaxAttempts": 2,
+                    "BackoffRate": 2
+                  }
+                ],
+                "ResultPath": "$.validation",
+                "Next": "Valid?"
+              },
+              "Valid?": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.validation.Payload.valid",
+                    "BooleanEquals": true,
+                    "Next": "NotifyApprover"
+                  }
+                ],
+                "Default": "MarkInvalid"
+              },
+              "MarkInvalid": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${FinalizeFunction}",
+                  "Payload": {
+                    "requestId.$": "$.requestId",
+                    "outcome": "INVALID",
+                    "reason.$": "$.validation.Payload.reasons"
+                  }
+                },
+                "ResultPath": null,
+                "End": true
+              },
+              "NotifyApprover": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+                "Parameters": {
+                  "FunctionName": "${NotifyFunction}",
+                  "Payload": {
+                    "requestId.$": "$.requestId",
+                    "token.$": "$$.Task.Token"
+                  }
+                },
+                "TimeoutSeconds": ${ApprovalTimeoutSeconds},
+                "ResultPath": "$.decision",
+                "Catch": [
+                  {
+                    "ErrorEquals": ["States.Timeout"],
+                    "ResultPath": "$.timeout",
+                    "Next": "MarkExpired"
+                  }
+                ],
+                "Next": "Approved?"
+              },
+              "MarkExpired": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${FinalizeFunction}",
+                  "Payload": {
+                    "requestId.$": "$.requestId",
+                    "outcome": "EXPIRED"
+                  }
+                },
+                "ResultPath": null,
+                "End": true
+              },
+              "Approved?": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.decision.decision",
+                    "StringEquals": "approve",
+                    "Next": "ApplyChange"
+                  }
+                ],
+                "Default": "MarkRejected"
+              },
+              "ApplyChange": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${ExecuteFunction}",
+                  "Payload.$": "$"
+                },
+                "Retry": [
+                  {
+                    "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+                    "IntervalSeconds": 2,
+                    "MaxAttempts": 2,
+                    "BackoffRate": 2
+                  }
+                ],
+                "ResultPath": "$.execution",
+                "End": true
+              },
+              "MarkRejected": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${FinalizeFunction}",
+                  "Payload": {
+                    "requestId.$": "$.requestId",
+                    "outcome": "REJECTED",
+                    "decision.$": "$.decision"
+                  }
+                },
+                "ResultPath": null,
+                "End": true
+              }
+            }
+          }
+      RoleArn: !GetAtt StateMachineRole.Arn
+
+  SubmitFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/submit
+      Description: Validate input, freeze a snapshot in S3, persist to DynamoDB, start the Step Functions workflow.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RequestsTable
+          BUCKET_NAME: !Ref ArtifactsBucket
+          STATE_MACHINE_ARN: !Sub "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-approval"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RequestsTable
+        - S3WritePolicy:
+            BucketName: !Ref ArtifactsBucket
+        - Statement:
+            - Effect: Allow
+              Action: states:StartExecution
+              Resource: !Sub "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-approval"
+      Events:
+        Submit:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /requests
+            Method: post
+
+  ValidateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/validate
+      Description: Pure validation of the change request payload. Stateless, no data-store permissions needed.
+      Policies: []
+
+  NotifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/notify
+      Description: Receives the Step Functions task token and parks it on the request item so an approver can answer via API. In production this is also where you would send email/SNS.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RequestsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RequestsTable
+
+  DecideFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/decide
+      Description: Human decision endpoint. Claims the request conditionally (no double approvals), then resolves the Step Functions callback via SendTaskSuccess/Failure.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RequestsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RequestsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - states:SendTaskSuccess
+                - states:SendTaskFailure
+              Resource: "*"
+      Events:
+        Decide:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /requests/{id}/decision
+            Method: post
+
+  ExecuteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/execute
+      Description: "Applies an approved change: updates DynamoDB and writes an immutable audit record to S3."
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RequestsTable
+          BUCKET_NAME: !Ref ArtifactsBucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RequestsTable
+        - S3WritePolicy:
+            BucketName: !Ref ArtifactsBucket
+
+  FinalizeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/finalize
+      Description: "Terminal states: INVALID, REJECTED or EXPIRED. Closes the request in DynamoDB and writes an audit record to S3."
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RequestsTable
+          BUCKET_NAME: !Ref ArtifactsBucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RequestsTable
+        - S3WritePolicy:
+            BucketName: !Ref ArtifactsBucket
+
+  ListFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/list
+      Description: GET /requests - scan (or query the status GSI when ?status= is given).
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RequestsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RequestsTable
+      Events:
+        List:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /requests
+            Method: get
+
+  GetFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/get
+      Description: GET /requests/{id} - full request item including history.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RequestsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RequestsTable
+      Events:
+        Get:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /requests/{id}
+            Method: get
+
+  SnapshotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/snapshot
+      Description: GET /requests/{id}/snapshot - presigned URL to the frozen S3 snapshot of the request.
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref ArtifactsBucket
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref ArtifactsBucket
+      Events:
+        Snapshot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /requests/{id}/snapshot
+            Method: get
+
+Outputs:
+  ApiEndpoint:
+    Description: Base URL of the HTTP API
+    Value: !Sub "${HttpApi.ApiEndpoint}"
+  WebsiteURL:
+    Description: Static web UI (S3 website hosting)
+    Value: !Sub "http://${WebsiteBucket.RegionalDomainName}/index.html"
+  WebsiteBucketName:
+    Description: Bucket that hosts the static UI (used by scripts/deploy-frontend.sh)
+    Value: !Ref WebsiteBucket
+  StateMachineName:
+    Description: Step Functions state machine name (open it in the console while demoing)
+    Value: !Sub "${AWS::StackName}-approval"

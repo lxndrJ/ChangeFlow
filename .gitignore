@@ -1,0 +1,5 @@
+.aws-sam/
+samconfig.toml
+frontend/config.js
+__pycache__/
+*.pyc

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ChangeFlow · Serverless Change Approvals</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="config.js"></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="brand">Change<span>Flow</span></div>
+    <div class="tagline">Serverless engineering-change approvals · scales to zero</div>
+  </header>
+
+  <main>
+    <section class="card" id="submit-card">
+      <h2>New change request</h2>
+      <form id="submit-form" autocomplete="off">
+        <div class="row">
+          <label>Part number
+            <input name="partNumber" required placeholder="e.g. SHIRT-COLLAR-0042" />
+          </label>
+          <label>Requested by
+            <input name="requestedBy" required placeholder="e.g. Alex" />
+          </label>
+        </div>
+        <label>Title
+          <input name="title" required minlength="4" placeholder="e.g. Switch collar interfacing to supplier B" />
+        </label>
+        <label>Description
+          <textarea name="description" required minlength="15" rows="3"
+            placeholder="What changes, why, and what it affects (min. 15 characters)"></textarea>
+        </label>
+        <div class="row">
+          <label>Impact
+            <select name="impact" required>
+              <option value="NONE">NONE</option>
+              <option value="LOW" selected>LOW</option>
+              <option value="MEDIUM">MEDIUM</option>
+              <option value="HIGH">HIGH</option>
+            </select>
+          </label>
+          <div class="actions-right">
+            <button type="submit" class="primary">Submit request</button>
+          </div>
+        </div>
+      </form>
+      <p id="submit-msg" class="msg"></p>
+    </section>
+
+    <section class="card" id="list-card">
+      <h2>Change requests <button id="refresh" class="ghost" title="Reload list">&#x21bb; Refresh</button></h2>
+      <table id="request-table">
+        <thead>
+          <tr><th>ID</th><th>Title</th><th>Part</th><th>Impact</th><th>Status</th><th>Submitted</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p id="empty-note" class="msg hidden">No change requests yet. Submit one above.</p>
+    </section>
+
+    <section class="card hidden" id="detail-card">
+      <h2>Request detail <button id="close-detail" class="ghost">Close</button></h2>
+      <div id="detail-body"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span>ChangeFlow · Lambda + API Gateway + DynamoDB + S3 + Step Functions</span>
+  </footer>
+</body>
+</html>
